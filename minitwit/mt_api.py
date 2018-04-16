@@ -86,8 +86,9 @@ def initdb_command():
     print('Initialized cass.')
 
 def user_inserts(db):
-    db.execute('''INSERT INTO user (username, email, pw_hash) VALUES (?, ?)''', "Daniel", "foo@bar.com")
-    db.execute('''INSERT INTO login (username, pw_hash) VALUES ("Daniel", ?)''', str([generate_password_hash('foobar')])
+    db.execute('''INSERT INTO user (username, email) VALUES ('Daniel', 'foo@bar.com')''')
+    thing = generate_password_hash('foobar')
+    db.execute('INSERT INTO login (username, pw_hash) VALUES (\'Daniel\', \'' + thing + '\')')
     # db.execute('''INSERT INTO user (username, email, pw_hash)
     # VALUES ("Sollis", "bar@foo.com", ?)''', [generate_password_hash('barfoo')])
     # db.execute('''INSERT INTO user (username, email, pw_hash)

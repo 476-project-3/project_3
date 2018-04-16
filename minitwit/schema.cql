@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS twits.users(
 CREATE TABLE IF NOT EXISTS twits.messages(
         author_username text,
         message_text text,
-        pub_date int);
+        pub_date int PRIMARY KEY);
 
 CREATE TABLE IF NOT EXISTS twits.login(
         username text PRIMARY KEY,
