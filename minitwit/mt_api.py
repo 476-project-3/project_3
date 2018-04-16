@@ -15,6 +15,8 @@ from flask import Flask, request, session, url_for, redirect, \
      render_template, abort, g, flash, _app_ctx_stack, jsonify
 from werkzeug import check_password_hash, generate_password_hash
 from flask_basicauth import BasicAuth
+from cassandra.cluster import Cluster
+from fileinput import input
 
 class MtAuth(BasicAuth):
     def check_credentials(self, username, password):
@@ -27,6 +29,7 @@ class MtAuth(BasicAuth):
         return False
 
 # configuration
+cluster = Cluster()
 DATABASE = 'minitwit.db'
 PER_PAGE = 30
 DEBUG = True
@@ -65,11 +68,28 @@ def init_db():
         db.cursor().executescript(f.read())
     db.commit()
 
+def init_db_cass():
+    """Initializes the database."""
+    cass_session = cluster.connect()
+    try:
+        cass_session.execute('''CREATE KEYSPACE "twits" WITH replication = 
+            {'class': 'SimpleStrategy', 'replication_factor' : 3};''')
+    except:
+        print "Keyspace Exists"
+    cass_session.set_keyspace('twits')
+    user_inserts(cass_session)
+
 @app.cli.command('initdb')
 def initdb_command():
     """Creates the database tables."""
     init_db()
     print('Initialized the database.')
+
+@app.cli.command('initcass')
+def initdb_command():
+    """Creates the database tables."""
+    init_db_cass()
+    print('Initialized cass.')
 
 def pop_db():
     """Populates the database"""
@@ -82,12 +102,12 @@ def pop_db():
 def user_inserts(db):
     db.execute('''INSERT INTO user (username, email, pw_hash)
     VALUES ("Daniel", "foo@bar.com", ?)''', [generate_password_hash('foobar')])
-    db.execute('''INSERT INTO user (username, email, pw_hash)
-    VALUES ("Sollis", "bar@foo.com", ?)''', [generate_password_hash('barfoo')])
-    db.execute('''INSERT INTO user (username, email, pw_hash)
-    VALUES ("Kaz", "foo@foo.com", ?)''', [generate_password_hash('foofoo')])
-    db.execute('''INSERT INTO user (username, email, pw_hash)
-    VALUES ("Antonio", "bar@bar.com", ?)''', [generate_password_hash('barbar')])
+    # db.execute('''INSERT INTO user (username, email, pw_hash)
+    # VALUES ("Sollis", "bar@foo.com", ?)''', [generate_password_hash('barfoo')])
+    # db.execute('''INSERT INTO user (username, email, pw_hash)
+    # VALUES ("Kaz", "foo@foo.com", ?)''', [generate_password_hash('foofoo')])
+    # db.execute('''INSERT INTO user (username, email, pw_hash)
+    # VALUES ("Antonio", "bar@bar.com", ?)''', [generate_password_hash('barbar')])
 
 @app.cli.command('popdb')
 def popdb_command():
