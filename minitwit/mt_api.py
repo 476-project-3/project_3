@@ -72,7 +72,7 @@ def init_db_cass():
     """Initializes the database."""
     cass_session = cluster.connect()
     try:
-        cass_session.execute('''CREATE KEYSPACE "twits" WITH replication = 
+        cass_session.execute('''CREATE KEYSPACE "twits" WITH replication =
             {'class': 'SimpleStrategy', 'replication_factor' : 3};''')
     except:
         print "Keyspace Exists"
@@ -82,50 +82,18 @@ def init_db_cass():
 @app.cli.command('initdb')
 def initdb_command():
     """Creates the database tables."""
-    init_db()
-    print('Initialized the database.')
-
-@app.cli.command('initcass')
-def initdb_command():
-    """Creates the database tables."""
     init_db_cass()
     print('Initialized cass.')
 
-def pop_db():
-    """Populates the database"""
-    db = get_db()
-    user_inserts(db)
-    with app.open_resource('population.sql', mode='r') as otherf:
-        db.executescript(otherf.read())
-        db.commit()
-
 def user_inserts(db):
-    db.execute('''INSERT INTO user (username, email, pw_hash)
-    VALUES ("Daniel", "foo@bar.com", ?)''', [generate_password_hash('foobar')])
+    db.execute('''INSERT INTO user (username, email, pw_hash) VALUES (?, ?)''', "Daniel", "foo@bar.com")
+    db.execute('''INSERT INTO login (username, pw_hash) VALUES ("Daniel", ?)''', str([generate_password_hash('foobar')])
     # db.execute('''INSERT INTO user (username, email, pw_hash)
     # VALUES ("Sollis", "bar@foo.com", ?)''', [generate_password_hash('barfoo')])
     # db.execute('''INSERT INTO user (username, email, pw_hash)
     # VALUES ("Kaz", "foo@foo.com", ?)''', [generate_password_hash('foofoo')])
     # db.execute('''INSERT INTO user (username, email, pw_hash)
     # VALUES ("Antonio", "bar@bar.com", ?)''', [generate_password_hash('barbar')])
-
-@app.cli.command('popdb')
-def popdb_command():
-    """adds predefined users to database"""
-    pop_db()
-    print('Populating the Database.')
-
-@app.cli.command('restartdb')
-def restartdb_command():
-    initdb()
-    popdb()
-    print('Remaking the Database.')
-
-def query_db(query, args=(), one=False):
-    """Queries the database and returns a list of dictionaries."""
-    cur = get_db().execute(query, args)
-    rv = cur.fetchall()
-    return (rv[0] if rv else None) if one else rv
 
 def query_db_json(query, desc, args=(), one=False):
     """Queries the database and returns a json"""
