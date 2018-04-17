@@ -17,16 +17,10 @@ from werkzeug import check_password_hash, generate_password_hash
 from flask_basicauth import BasicAuth
 from cassandra.cluster import Cluster
 from fileinput import input
+from operator import attrgetter
+from collections import namedtuple
 
-class MtAuth(BasicAuth):
-    def check_credentials(self, username, password):
-        cursor = get_db().cursor()
-        cursor.execute('''select pw_hash from user where username="''' + str(username) + '''"''')
-        data = cursor.fetchone()
-        if data != None:
-            if check_password_hash(data[0], password):
-                return True
-        return False
+
 
 # configuration
 cluster = Cluster()
@@ -37,7 +31,6 @@ SECRET_KEY = b'_5#y2L"F4Q8z\n\xec]/'
 
 # create our little application :)
 app = Flask('minitwit')
-basic_auth = MtAuth(app)
 app.config.from_object(__name__)
 app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 
@@ -86,9 +79,26 @@ def initdb_command():
     print('Initialized cass.')
 
 def user_inserts(db):
-    db.execute('''INSERT INTO user (username, email) VALUES ('Daniel', 'foo@bar.com')''')
+    db.execute('''INSERT INTO users (username, email, followers, followees)
+     VALUES ('Daniel', 'foo@bar.com', {'Kaz', 'Antonio'}, {'Kaz'})''')
+    db.execute('''INSERT INTO users (username, email, followers, followees)
+     VALUES ('Sollis', 'bar@foo.com', {}, {'Antonio'})''')
+    db.execute('''INSERT INTO users (username, email, followers, followees)
+     VALUES ('Kaz', 'foo@foo.com', {'Daniel'}, {'Sollis'})''')
+    db.execute('''INSERT INTO users (username, email, followers, followees)
+     VALUES ('Antonio', 'bar@bar.com', {'Kaz', 'Daniel', 'Sollis'}, {'Kaz'})''')
+
+    #insert login information into 'login' table
     thing = generate_password_hash('foobar')
     db.execute('INSERT INTO login (username, pw_hash) VALUES (\'Daniel\', \'' + thing + '\')')
+    thing = generate_password_hash('barfoo')
+    db.execute('INSERT INTO login (username, pw_hash) VALUES (\'Sollis\', \'' + thing + '\')')
+    thing = generate_password_hash('kaz')
+    db.execute('INSERT INTO login (username, pw_hash) VALUES (\'Kaz\', \'' + thing + '\')')
+    thing = generate_password_hash('barbar')
+    db.execute('INSERT INTO login (username, pw_hash) VALUES (\'Antonio\', \'' + thing + '\')')
+
+
     # db.execute('''INSERT INTO user (username, email, pw_hash)
     # VALUES ("Sollis", "bar@foo.com", ?)''', [generate_password_hash('barfoo')])
     # db.execute('''INSERT INTO user (username, email, pw_hash)
@@ -126,32 +136,67 @@ def get_g_user():
     user.pass_hash = row[3]
     return user
 
+class MtAuth(BasicAuth):
+    def check_credentials(self, username, password):
+        session = cluster.connect()
+        rows = session.execute('''SELECT pw_hash FROM twits.login WHERE username=\'''' + username + '''\'''')
+        if rows != None:
+            for x in rows:
+                if check_password_hash(x.pw_hash, password):
+                    return True
+        return False
+
+basic_auth = MtAuth(app)
+
 #===============================================================================
 #testing API endpoints
+@app.route('/api/guser/<username>', methods = ['GET'])
+def get_g_user(username):
+    session = cluster.connect()
+    rows = session.execute('select * from twits.users where username =\'' + username + '\'')
+    for row in rows:
+        username = row.username
+        email = row.email
+    rows = session.execute('select * from twits.login where username =\'' + username + '\'')
+    for row in rows:
+        pass_hash = row.pw_hash
+    return jsonify({ 'username' : username, 'email' : email, 'pass_hash' : pass_hash})
+
+#Working with CASS
 """
 API Route for getting all users
 Just send a GET request to /api/users to get all users back in a json.
 """
 @app.route('/api/users', methods = ['GET'])
 def get_users():
-    cursor = get_db().cursor()
-    users = cursor.execute('''select * from user;''')
-    r = [dict((cursor.description[i][0], value)
-              for i, value in enumerate(row)) for row in cursor.fetchall()]
-    return jsonify({'users' : r})
+    session = cluster.connect()
+    rows = session.execute('''select * from twits.users''')
+    users = { 'users' : []}
+    for row in rows:
+        new_dictionary = { 'username' : row.username, 'email' : row.email}
+        users['users'].append(new_dictionary)
+    return jsonify(users)
 
+#WORKING WITH CASS
 """
 API Route for Public Timeline
 Just send a GET requuest to /api/public to get all of the public timeline back in a json.
 """
 @app.route('/api/public', methods = ['GET'])
 def get_public():
-    messages=query_db_json('''
-        select message.*, user.username, user.email from message, user
-        where message.author_id = user.user_id
-        order by message.pub_date desc limit ?''', 'public timeline', [PER_PAGE])
-    return messages
+    session = cluster.connect()
+    rows = session.execute('SELECT * FROM twits.messages')
+    messages = {'public timeline' : []}
+    list_of_messages = []
+    for row in rows:
+        list_of_messages.append(row)
+    sorted_messages = sorted(list_of_messages, reverse=True, key=attrgetter('pub_date'))
+    for message in sorted_messages:
+        new_dictionary= {'text' : message.message_text, 'pub_date' : message.pub_date, 'username' : message.author_username, 'email' : message.email}
+        messages['public timeline'].append(new_dictionary)
+    return jsonify(messages)
 
+#WORKING WITH CASS
 """
 API Route for getting users timeline (All messages made by user)
 Send a GET request to "/api/users/<username>/timeline" (replacing <username> with desired username)
@@ -159,49 +204,57 @@ to get back all of that users posts in a json.
 """
 @app.route('/api/users/<username>/timeline', methods = ['GET'])
 def users_timeline(username):
-    if request.method != 'GET':
-        return jsonify({'status code' : '405'})
-    cursor = get_db().cursor()
-    cursor.execute('''select user_id from user where username="''' + str(username) + '''"''')
-    user_id = cursor.fetchone()
-    if user_id == None:
-        return jsonify({'status code' : '404'})
-    cursor.execute('''select * from message, user where author_id="''' +
-                   str(user_id[0]) + '''" and user_id = "''' +
-                   str(user_id[0]) + '''"''')
-    r = [dict((cursor.description[i][0], value)
-              for i, value in enumerate(row)) for row in cursor.fetchall()]
-    return jsonify({str(username) + '\'s timeline' : r})
+    session = cluster.connect()
+    rows = session.execute('SELECT * FROM twits.messages WHERE author_username=\'' + username + '\'')
+    timeline = username + "\'s timeline"
+    messages = { timeline : []}
+    list_of_messages = []
+    for row in rows:
+        list_of_messages.append(row)
+    sorted_messages = sorted(list_of_messages, key=attrgetter('pub_date'))
+    for message in sorted_messages:
+        new_dictionary= {'text' : message.message_text, 'pub_date' : message.pub_date, 'username' : message.author_username, 'email' : message.email}
+        messages[timeline].append(new_dictionary)
+    return jsonify(messages)
 
+#WORKING
 """
 API Route for registering new user
 This route only takes POST requests.
 A new user requires a new username, password, and email.
 This route doesn't actually require authentication, but still uses those fields.
-The username and password should be put into the authorization form of the request, using Basic Authentication.
+The username and password should be put into the authorization form of the request, using Basic Au@basic_auth.required
+thentication.
 The email of the user should be put into the request body under the key "email"
 """
 @app.route('/api/register', methods = ['POST'])
 def add_user():
-    cursor = get_db().cursor()
-    cursor.execute('''select user_id from user where username="''' + str(request.authorization["username"]) + '''"''')
-    user_id = cursor.fetchone()
+    session = cluster.connect()
+    rows = session.execute('''select username from twits.users where username=\'''' + str(request.authorization["username"]) + '''\'''')
     email = request.form.get("email")
-    if user_id != None:
+    if rows:
         return jsonify({"message": "That username is already taken. Please try a different username."})
     elif email == None:
         return jsonify({"message": "There was no email for the user in the request body. Please add the user's email in the 'email' form in the request body"})
     else:
-        db = get_db()
-        db.execute('insert into user (username, email, pw_hash) values (?, ?, ?)',
-            [request.authorization["username"], email, generate_password_hash(request.authorization["password"])])
-        db.commit()
+        hashed_pass = generate_password_hash(request.authorization["password"])
+        session.execute('insert into twits.login (username, pw_hash) values (\'' + request.authorization["username"] + '\', \'' + hashed_pass + '\')')
+        session.execute('insert into twits.users (username, email) values (\'' + request.authorization["username"] + '\', \'' + email + '\')')
         m = "Success, user has been added."
         return jsonify({"message" : m})
 
+#WORKING WITH CASS
 @app.route('/api/users/<username>', methods = ['GET'])
 def get_user(username):
-    return query_db_json('''select * from user where username= ?''', 'user', [username])
+    session = cluster.connect()
+    rows = session.execute('''select * from twits.users where username=\''''+ username + '\' ALLOW FILTERING')
+    user = {'user' : []}
+    if rows:
+        for row in rows:
+            new_dictionary= {'username' : row.username, 'email' : row.email}
+            user['user'].append(new_dictionary)
+    return jsonify(user)
+
 
 """
 API Route for getting users who username is followed by
@@ -210,21 +263,20 @@ to get back all of the users following that user in a json.
 """
 @app.route('/api/users/<username>/followers', methods = ['GET'])
 def get_followers(username):
-    cursor = get_db().cursor()
-    user_id = get_user_id(username)
-    if user_id is None:
+    session = cluster.connect()
+    rows = session.execute('select * from twits.users where username=\'' + username + '\'')
+    if not rows:
         return jsonify({"status code" : "404"})
-    cursor.execute('''select who_id from follower where whom_id="''' + str(user_id) + '''"''')
-    follower_ids = [dict((cursor.description[i][0], value)
-              for i, value in enumerate(row)) for row in cursor.fetchall()]
-    follower_names = []
-    for i in range(len(follower_ids)):
-        name = get_username(int(follower_ids[i].values()[0]))
-        follower_names.append(name)
-    return_dict = {}
-    for i in range(0, len(follower_names)):
-        return_dict[str(i + 1)] = follower_names[i]
-    return jsonify({"followers" : return_dict})
+    for row in rows:
+        followers = row.followers
+    followers_dict = { "followers" : []}
+    if not followers:
+        return jsonify(followers_dict)
+    for follower in followers:
+        new_dict = { 'user' : follower }
+        followers_dict['followers'].append(new_dict)
+    return jsonify(followers_dict)
+
 
 """
 API Route for getting users who username is following
@@ -232,22 +284,21 @@ Send a GET request to "/api/users/<username>/following" (replacing <username> wi
 to get back all of the users that user is following in a json."""
 @app.route('/api/users/<username>/following', methods = ['GET'])
 def get_following(username):
-    cursor = get_db().cursor()
-    user_id = get_user_id(username)
-    if user_id is None:
+    session = cluster.connect()
+    rows = session.execute('select * from twits.users where username=\'' + username + '\'')
+    if not rows:
         return jsonify({"status code" : "404"})
-    cursor.execute('''select whom_id from follower where who_id="''' + str(user_id) + '''"''')
-    follower_ids = [dict((cursor.description[i][0], value)
-              for i, value in enumerate(row)) for row in cursor.fetchall()]
-    follower_names = []
-    for i in range(len(follower_ids)):
-        name = get_username(int(follower_ids[i].values()[0]))
-        follower_names.append(name)
-    return_dict = {}
-    for i in range(0, len(follower_names)):
-        return_dict[str(i + 1)] = follower_names[i]
-    return jsonify({"following" : return_dict})
+    for row in rows:
+        followees = row.followees
+    followees_dict = { "following" : []}
+    if not followees:
+        return jsonify(followees_dict)
+    for followee in followees:
+        new_dict = { 'user' : followee }
+        followees_dict['following'].append(new_dict)
+    return jsonify(followees_dict)
 
+#WORKING
 """
 API Route for posting
 This route requires authentication, the fields must be filled out accordingly in the request.
@@ -262,10 +313,11 @@ def insert_message(username):
                                   " Please add what you would like to post under"
                                   " the 'message' form in the request body"})
     if request.authorization["username"] == username:
-        db = get_db()
-        db.execute('insert into message (author_id, text, pub_date) values (?, ?, ?)',
-            [get_user_id(username), post_message, time.time()])
-        db.commit()
+        session = cluster.connect()
+        rows = session.execute('SELECT email from twits.users WHERE username=\'' + username + '\'')
+        for row in rows:
+            email = row.email
+        session.execute('insert into twits.messages (author_username, message_text, email, pub_date) values (\'' + username + '\', \'' + post_message +  '\', \'' + email + '\', '  + str(int(time.time())) + ')')
         m = "Success, you've made a post."
         return jsonify({"message" : m})
     else:
@@ -279,19 +331,45 @@ Sending a GET request returns the dashboard for that user, which is all the mess
 @app.route('/api/users/<username>/dashboard', methods = ['GET'])
 @basic_auth.required
 def get_dash(username):
-    if request.authorization["username"] == username:
-        messages = query_db_json('''
-            select message.*, user.* from message, user
-            where message.author_id = user.user_id and (
-                user.user_id = ? or
-                user.user_id in (select whom_id from follower
-                                    where who_id = ?))
-                order by message.pub_date desc limit ?''', 'dashboard',
-                [get_user_id(username), get_user_id(username), PER_PAGE])
-        return messages
+    if username != request.authorization["username"]:
+        return jsonify({ 'error' : '401: Not Authorized'})
+    session = cluster.connect()
+    get_followees = session.execute('SELECT followees from twits.users where username=\'' + username + '\'')
+    for x in get_followees:
+        get_followees = x;
+    if get_followees[0]:
+        followees = []
+        for followee in get_followees:
+            for x in followee:
+             followees.append(x)
+        dash = {"dashboard" : []}
+        followee_messages = []
+        for users in followees:
+            rows = session.execute('SELECT * FROM twits.messages WHERE author_username=\'' + users + '\'')
+            for message in rows:
+                followee_messages.append(message)
+        rows = session.execute('SELECT * FROM twits.messages WHERE author_username=\'' + username + '\'')
+        for message in rows:
+            followee_messages.append(message)
+        followee_messages = sorted(followee_messages, reverse=True, key=attrgetter('pub_date'))
+        for message in followee_messages:
+            json_message = {'text' : message.message_text, 'pub_date' : message.pub_date, 'username' : message.author_username, 'email' : message.email}
+            dash["dashboard"].append(json_message)
+        return jsonify(dash)
     else:
-        return jsonify({"status code" : "403 Forbidden: This dashboard doesn't belong to you"})
+        followee_messages = []
+        dash = {"dashboard" : []}
+        rows = session.execute('SELECT * FROM twits.messages WHERE author_username=\'' + username + '\'')
+        if rows:
+            for message in rows:
+                followee_messages.append(message)
+        followee_messages = sorted(followee_messages, reverse=True, key=attrgetter('pub_date'))
+        for message in followee_messages:
+            json_message = {'text' : message.message_text, 'pub_date' : message.pub_date, 'username' : message.author_username, 'email' : message.email}
+            dash["dashboard"].append(json_message)
+        return jsonify(dash)
 
+#WORKING
 """
 Route for Api Follow
 This route requires authentication, the fields must be filled out accordingly in the request.
@@ -303,22 +381,38 @@ With authenticated Daniel login would make the user Daniel follow the user Kaz
 @app.route('/api/users/<follower>/follow/<followee>', methods = ['POST'])
 @basic_auth.required
 def api_follow(follower, followee):
+    session = cluster.connect()
     if request.authorization["username"] == follower:
-        if(get_user_id(follower) == get_user_id(followee)):
+        if(follower == followee):
             return jsonify({"Error" : "You can't follow yourself"})
-        followee_id = get_user_id(followee)
-        follower_id = get_user_id(follower)
-        if followee_id is None or follower_id is None:
+        rows = session.execute('SELECT username from twits.users where username = \'' + follower + '\'')
+        if(rows == None):
             return jsonify({"status code" : "404: User not found."})
-        db = get_db()
-        db.execute('insert into follower (who_id, whom_id) values (?, ?)',
-            [get_user_id(follower), get_user_id(followee)])
-        db.commit()
+        rows = session.execute('SELECT username from twits.users where username = \'' + followee + '\'')
+        if(rows == None):
+            return jsonify({"status code" : "404: User not found."})
+        session.execute('UPDATE twits.users SET followees = followees + {\'' + followee + '\'} WHERE username = \'' + follower + '\'')
+        session.execute('UPDATE twits.users SET followers = followers + {\'' + follower + '\'} WHERE username = \'' + followee + '\'')
         m = "Success, You are now following " + followee
         return jsonify({"message" : m})
     else:
         return jsonify({"status code" : "403 Forbidden: You're trying to make someone who isn't you follow someone else."})
 
+@app.route('/api/users/<username>/check_hash', methods = ['GET'])
+def get_pw_hash(username):
+    session = cluster.connect()
+    rows = session.execute('select * from twits.login where username=\'' + username + '\'')
+    return_dict = { 'user' : []}
+    if rows:
+        for row in rows:
+            new_dict = {'username' : row.username, 'pw_hash' : row.pw_hash}
+            return_dict['user'].append(new_dict)
+    return jsonify(return_dict)
+
+
+
+
+#WORKING,
 """
 Route for Api Unfollow
 This route requires authentication, the fields must be filled out accordingly in the request.
@@ -330,17 +424,18 @@ With authenticated Daniel login would make the user Daniel unfollow the user Kaz
 @app.route('/api/users/<follower>/unfollow/<followee>', methods = ['DELETE'])
 @basic_auth.required
 def api_unfollow(follower, followee):
+    session = cluster.connect()
     if request.authorization["username"] == follower:
-        if(get_user_id(follower) == get_user_id(followee)):
+        if(follower == followee):
             return jsonify({"Error" : "You can't unfollow yourself"})
-        followee_id = get_user_id(followee)
-        follower_id = get_user_id(follower)
-        if followee_id is None or follower_id is None:
+        rows = session.execute('SELECT username from twits.users where username = \'' + follower + '\'')
+        if not rows:
             return jsonify({"status code" : "404: User not found."})
-        db = get_db()
-        db.execute('delete from follower where who_id=? and whom_id=?',
-                  [follower_id, followee_id])
-        db.commit()
+        rows = session.execute('SELECT username from twits.users where username = \'' + followee + '\'')
+        if not rows:
+            return jsonify({"status code" : "404: User not found."})
+        session.execute('UPDATE twits.users SET followees = followees - {\'' + followee + '\'} WHERE username = \'' + follower + '\'')
+        session.execute('UPDATE twits.users SET followers = followers - {\'' + follower + '\'} WHERE username = \'' + followee + '\'')
         m = "Success, you unfollowed " + followee
         return jsonify({"message" : m})
     else:

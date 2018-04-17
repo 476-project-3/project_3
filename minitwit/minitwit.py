@@ -20,8 +20,6 @@ from flask import Flask, request, session, url_for, redirect, \
      render_template, abort, g, flash, _app_ctx_stack, jsonify
 from werkzeug import check_password_hash, generate_password_hash
 from flask_basicauth import BasicAuth
-from mt_api import get_username, get_user_id, query_db, \
-    query_db_json, get_db, close_database, get_g_user, restartdb_command
 
 # configuration
 PER_PAGE = 30
@@ -35,6 +33,14 @@ app = Flask('minitwit')
 app.config.from_object(__name__)
 app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 
+def get_g_user():
+    username = session['username']
+    r = requests.get(API_BASE_URL + "/api/guser/" + username).json()
+    user = type('User', (object,), {})()
+    user.username = r['username']
+    user.email = r['email']
+    user.pass_hash = r['pass_hash']
+    return user
 
 def format_datetime(timestamp):
     """Format a timestamp for display."""
@@ -49,7 +55,7 @@ def gravatar_url(email, size=80):
 def get_timeline_message(x):
     post = type('Post', (object,), {})()
     post.text = x['text']
-    post.username = get_username(x['author_id'])
+    post.username = x['username']
     post.email = x['email']
     post.pub_date = x['pub_date']
     return post
@@ -65,7 +71,7 @@ def convert_user(x):
 @app.before_request
 def before_request():
     g.user = None
-    if 'user_id' in session:
+    if 'username' in session:
         g.user = get_g_user()
 
 @app.route('/')
@@ -105,7 +111,7 @@ def user_timeline(username):
         followed_request = requests.get(API_BASE_URL + "/api/users/" +
                                         g.user.username + "/following")
         for x in followed_request.json()["following"]:
-            if get_username(x) == username:
+            if x['user'] == username:
                 followed = True
     r = requests.get(API_BASE_URL + "/api/users/" + username + "/timeline")
     user_timeline_items = r.json()[str(username) + '\'s timeline']
@@ -144,8 +150,8 @@ def unfollow_user(username):
     """Removes the current user as follower of the given user."""
     if not g.user:
         abort(401)
-    whom_id = get_user_id(username)
-    if whom_id is None:
+    whom = requests.get(API_BASE_URL + "/api/users/" + username).json()['user']
+    if not whom:
         abort(404)
     r = requests.delete(API_BASE_URL + "/api/users/" + g.user.username +
                       "/unfollow/" + username, auth=(g.user.username, session['pass']))
@@ -157,7 +163,7 @@ def unfollow_user(username):
 @app.route('/add_message', methods=['POST'])
 def add_message():
     """Registers a new message for the user."""
-    if 'user_id' not in session:
+    if 'username' not in session:
         abort(401)
     if request.form['text']:
         message = request.form['text']
@@ -179,7 +185,7 @@ def login():
         return redirect(url_for('timeline'))
     error = None
     if request.method == 'POST':
-        user = requests.get(API_BASE_URL + "/api/users/" + request.form['username']).json()['user']
+        user = requests.get(API_BASE_URL + "/api/users/" + request.form['username'] + "/check_hash").json()['user']
         if not user:
             error = 'Invalid username'
         elif not check_password_hash(user[0]['pw_hash'],
@@ -187,7 +193,7 @@ def login():
             error = 'Invalid password'
         else:
             flash('You were logged in')
-            session['user_id'] = user[0]['user_id']
+            session['username'] = user[0]['username']
             session['pass'] = request.form['password']
             return redirect(url_for('timeline'))
 
@@ -210,7 +216,7 @@ def register():
             error = 'You have to enter a password'
         elif request.form['password'] != request.form['password2']:
             error = 'The two passwords do not match'
-        elif get_user_id(request.form['username']) is not None:
+        elif requests.get(API_BASE_URL + "/api/users/" + request.form['username']).json()['user']:
             error = 'The username is already taken'
         else:
             email_header = {'email' : request.form['email']}
@@ -224,7 +230,7 @@ def register():
 def logout():
     """Logs the user out."""
     flash('You were logged out')
-    session.pop('user_id', None)
+    session.pop('username', None)
     return redirect(url_for('public_timeline'))
 
 # add some filters to jinja
